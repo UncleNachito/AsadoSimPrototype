@@ -1,0 +1,12 @@
+{
+  "cuts": [
+    {
+      "id": "chorizo",
+      "displayName": "Chorizo",
+      "idealSeconds": 35,
+      "toleranceSeconds": 8,
+      "burnSeconds": 60,
+      "baseScore": 100
+    }
+  ]
+}
