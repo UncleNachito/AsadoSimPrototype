@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System.Collections.Generic;
+using UnityEngine;
 
 public class RunManager : MonoBehaviour
 {
@@ -17,9 +18,18 @@ public class RunManager : MonoBehaviour
     [Header("Perks")]
     public PerkDefinition[] allPerks;
 
+    [Header("Perk Offer - Rarity Chances")]
+    [Range(0f, 1f)] public float commonChance = 0.75f;
+    [Range(0f, 1f)] public float rareChance = 0.20f;
+    [Range(0f, 1f)] public float epicChance = 0.05f;
+
+    [Header("Perk Offer - Rules")]
+    public bool avoidSameTypeInOffer = true;
+
     // Runtime perk options (current choice)
     private PerkDefinition perkA;
     private PerkDefinition perkB;
+    private PerkDefinition perkC;
 
     // Runtime modifiers (affected by perks)
     [Header("DEV Tuning (testing)")]
@@ -35,6 +45,7 @@ public class RunManager : MonoBehaviour
     private int burnDamage = 30;
     private int undercookDamage = 10;
 
+    private PerkDefinition lastPickedPerk = null;
 
     private bool runOver = false;
     private GameUIController ui;
@@ -56,6 +67,7 @@ public class RunManager : MonoBehaviour
         // Dev shortcut opcional: ENTER reinicia si estás en game over
         if (runOver && Input.GetKeyDown(KeyCode.Return))
             RestartRun();
+
         if (!devMode) return;
 
         // F1: Completar nivel (abrir perks)
@@ -76,6 +88,13 @@ public class RunManager : MonoBehaviour
             StartNextLevel();
         }
 
+        // Debug: elegir perks con teclas si el panel está abierto
+        if (devMode && ui != null && ui.panelPerkChoice != null && ui.panelPerkChoice.activeSelf)
+        {
+            if (Input.GetKeyDown(KeyCode.Alpha1)) PickPerkA();
+            if (Input.GetKeyDown(KeyCode.Alpha2)) PickPerkB();
+            if (Input.GetKeyDown(KeyCode.Alpha3)) PickPerkC(); // opcional si ya tienes 3 perks en UI
+        }
     }
 
     // ----------------- EVENTS FROM MEAT -----------------
@@ -120,7 +139,6 @@ public class RunManager : MonoBehaviour
         }
     }
 
-
     void LoseHP(int amount, string reason)
     {
         currentHP -= amount;
@@ -136,8 +154,6 @@ public class RunManager : MonoBehaviour
     void LevelComplete()
     {
         Debug.Log($"✅ NIVEL {currentLevel} COMPLETADO");
-
-        // En vez de avanzar directo, abrimos selección de perk
         ShowPerkSelection();
     }
 
@@ -157,7 +173,6 @@ public class RunManager : MonoBehaviour
 
         Debug.Log($"➡️ Comienza nivel {currentLevel} | Carnes requeridas: {meatsRequiredForLevel} | ratio bonus: {goodRatioBonus:0.00}");
     }
-
 
     void GameOver()
     {
@@ -187,6 +202,8 @@ public class RunManager : MonoBehaviour
 
         // Reset modifiers
         scoreMultiplier = 1f;
+        goodRatioBonus = 0f;
+        totalScore = 0;
 
         if (devMode)
         {
@@ -197,15 +214,14 @@ public class RunManager : MonoBehaviour
         }
         else
         {
-            currentHP = maxHP;
             meatsRequiredForLevel = 5;
             burnDamage = 30;
             undercookDamage = 10;
         }
 
         currentHP = maxHP;
+        lastPickedPerk = null;
     }
-
 
     // ----------------- MEAT SUBSCRIBE (spawns dinámicos) -----------------
     public void RegisterMeat(MeatItem meat)
@@ -228,15 +244,10 @@ public class RunManager : MonoBehaviour
         else if (level <= 4) baseRatio = 0.6f;
         else baseRatio = 0.75f;
 
-        // Aplica bonus de perks (puede ser negativo para bajar exigencia)
         float finalRatio = baseRatio + goodRatioBonus;
-
-        // Clamp: nunca menos de 0.10 ni más de 0.95 (ajustable después)
         finalRatio = Mathf.Clamp(finalRatio, 0.10f, 0.95f);
-
         return finalRatio;
     }
-
 
     // ----------------- PERKS -----------------
     void ShowPerkSelection()
@@ -251,38 +262,62 @@ public class RunManager : MonoBehaviour
         if (allPerks == null || allPerks.Length < 2)
         {
             Debug.Log("⚠️ No hay perks suficientes, avanzando sin perk.");
-            ui.ShowLevelComplete(); // opcional: mostrar panel de nivel completado igual
-            // Si quieres que siga inmediatamente, comenta la línea de arriba y deja StartNextLevel directo.
             StartNextLevel();
             return;
         }
 
-        int iA = Random.Range(0, allPerks.Length);
-        int iB = Random.Range(0, allPerks.Length);
-        while (iB == iA) iB = Random.Range(0, allPerks.Length);
+        // Pausa la run mientras eliges
+        Time.timeScale = 0f;
 
-        perkA = allPerks[iA];
-        perkB = allPerks[iB];
+        // Conjunto de tipos prohibidos para esta oferta (para que no repita tipo)
+        HashSet<PerkType> bannedTypes = avoidSameTypeInOffer ? new HashSet<PerkType>() : null;
 
-        // Mostrar panel perks (pausa)
+        // A
+        perkA = PickRandomPerkByRarity(RollRarity(), exclude: lastPickedPerk, alsoExclude: null, bannedTypes: bannedTypes);
+        if (perkA != null && bannedTypes != null) bannedTypes.Add(perkA.type);
+
+        // B (evita duplicar A y lastPicked)
+        perkB = PickRandomPerkByRarity(RollRarity(), exclude: perkA, alsoExclude: lastPickedPerk, bannedTypes: bannedTypes);
+        if (perkB != null && bannedTypes != null) bannedTypes.Add(perkB.type);
+
+        // C (evita duplicar A/B y lastPicked)
+        perkC = PickRandomPerkByRarity(RollRarity(), exclude: perkA, alsoExclude: perkB, bannedTypes: bannedTypes);
+        // Además, que no sea lastPicked (porque acá alsoExclude es perkB)
+        if (perkC == lastPickedPerk)
+        {
+            perkC = PickRandomPerkByRarity(PerkRarity.Common, exclude: perkA, alsoExclude: perkB, bannedTypes: bannedTypes);
+        }
+
+        // Fallbacks: relajar rareza pero mantener exclusiones
+        if (perkA == null) perkA = PickRandomPerkByRarity(PerkRarity.Common, exclude: lastPickedPerk, alsoExclude: null, bannedTypes: null);
+        if (perkB == null) perkB = PickRandomPerkByRarity(PerkRarity.Common, exclude: perkA, alsoExclude: lastPickedPerk, bannedTypes: null);
+        if (perkC == null) perkC = PickRandomPerkByRarity(PerkRarity.Common, exclude: perkA, alsoExclude: perkB, bannedTypes: null);
+
+        // Si aún así no hay oferta mínima, sigue
+        if (perkA == null || perkB == null)
+        {
+            Debug.Log("⚠️ No se pudo armar oferta de perks, avanzando sin perk.");
+            Time.timeScale = 1f;
+            StartNextLevel();
+            return;
+        }
+
         ui.ShowPerkChoice();
+        ui.SetPerkOffer("Elige un perk", perkA.perkName, perkB.perkName, perkC != null ? perkC.perkName : null);
 
-        // Setear textos de botones (requiere que ui tenga estas refs)
-        if (ui.btnAText != null) ui.btnAText.text = perkA.perkName;
-        if (ui.btnBText != null) ui.btnBText.text = perkB.perkName;
 
-        Debug.Log($"🎁 Perks: A={perkA.perkName} | B={perkB.perkName}");
+        // Si tienes btnCText en tu UI, puedes agregarlo después.
+        Debug.Log(
+            $"🎁 Perks oferta: " +
+            $"A={perkA.perkName} ({perkA.rarity}) | " +
+            $"B={perkB.perkName} ({perkB.rarity}) | " +
+            $"C={(perkC != null ? perkC.perkName : "NULL")} ({(perkC != null ? perkC.rarity.ToString() : "-")})"
+        );
     }
 
-    public void PickPerkA()
-    {
-        ApplyPerk(perkA);
-    }
-
-    public void PickPerkB()
-    {
-        ApplyPerk(perkB);
-    }
+    public void PickPerkA() => ApplyPerk(perkA);
+    public void PickPerkB() => ApplyPerk(perkB);
+    public void PickPerkC() => ApplyPerk(perkC);
 
     void ApplyPerk(PerkDefinition perk)
     {
@@ -290,9 +325,12 @@ public class RunManager : MonoBehaviour
         {
             Debug.Log("⚠️ Perk nulo, avanzando.");
             ui?.HideAll();
+            Time.timeScale = 1f;
             StartNextLevel();
             return;
         }
+
+        lastPickedPerk = perk;
 
         Debug.Log($"✅ Elegiste perk: {perk.perkName}");
 
@@ -321,22 +359,99 @@ public class RunManager : MonoBehaviour
 
             case PerkType.ReduceRequiredGoodRatio:
                 {
-                    goodRatioBonus -= perk.value; // si perk.value = 0.10, bonus queda -0.10
+                    goodRatioBonus -= perk.value;
                     break;
                 }
+
             case PerkType.ReduceMeatsRequired:
                 {
-                    int reduce = Mathf.RoundToInt(perk.value);   // ej: value = 1
+                    int reduce = Mathf.RoundToInt(perk.value);
                     meatsRequiredForLevel = Mathf.Max(1, meatsRequiredForLevel - reduce);
                     Debug.Log($"🍖 Perk: -{reduce} carnes requeridas (ahora {meatsRequiredForLevel})");
                     break;
                 }
-
         }
 
         ui?.HideAll();
+        Time.timeScale = 1f;
         StartNextLevel();
         Debug.Log($"📌 Modificadores: xScore={scoreMultiplier:0.00} | burnDmg={burnDamage} | underDmg={undercookDamage} | ratioBonus={goodRatioBonus:0.00}");
+    }
 
+    // ----------------- PERK SELECTION HELPERS -----------------
+    PerkRarity RollRarity()
+    {
+        float total = commonChance + rareChance + epicChance;
+        if (total <= 0.0001f) return PerkRarity.Common;
+
+        float r = Random.value * total;
+
+        if (r < commonChance) return PerkRarity.Common;
+        r -= commonChance;
+
+        if (r < rareChance) return PerkRarity.Rare;
+        return PerkRarity.Epic;
+    }
+
+    PerkDefinition PickRandomPerkByRarity(
+        PerkRarity target,
+        PerkDefinition exclude = null,
+        PerkDefinition alsoExclude = null,
+        HashSet<PerkType> bannedTypes = null
+    )
+    {
+        // Intento con rareza objetivo, luego fallbacks
+        PerkDefinition picked = PickWeightedFromPool(target, exclude, alsoExclude, bannedTypes);
+        if (picked != null) return picked;
+
+        if (target == PerkRarity.Epic)
+        {
+            picked = PickWeightedFromPool(PerkRarity.Rare, exclude, alsoExclude, bannedTypes);
+            if (picked != null) return picked;
+        }
+
+        picked = PickWeightedFromPool(PerkRarity.Common, exclude, alsoExclude, bannedTypes);
+        return picked;
+    }
+
+    PerkDefinition PickWeightedFromPool(
+        PerkRarity rarity,
+        PerkDefinition exclude,
+        PerkDefinition alsoExclude,
+        HashSet<PerkType> bannedTypes
+    )
+    {
+        if (allPerks == null || allPerks.Length == 0) return null;
+
+        int totalWeight = 0;
+
+        foreach (var p in allPerks)
+        {
+            if (p == null) continue;
+            if (p == exclude) continue;
+            if (p == alsoExclude) continue;
+            if (bannedTypes != null && bannedTypes.Contains(p.type)) continue;
+            if (p.rarity != rarity) continue;
+
+            totalWeight += Mathf.Max(0, p.weight);
+        }
+
+        if (totalWeight <= 0) return null;
+
+        int roll = Random.Range(0, totalWeight);
+
+        foreach (var p in allPerks)
+        {
+            if (p == null) continue;
+            if (p == exclude) continue;
+            if (p == alsoExclude) continue;
+            if (bannedTypes != null && bannedTypes.Contains(p.type)) continue;
+            if (p.rarity != rarity) continue;
+
+            roll -= Mathf.Max(0, p.weight);
+            if (roll < 0) return p;
+        }
+
+        return null;
     }
 }
